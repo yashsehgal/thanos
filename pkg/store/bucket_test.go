@@ -571,9 +571,9 @@ func TestBucketStore_Info(t *testing.T) {
 		nil,
 		nil,
 		dir,
-		noopCache{},
 		nil,
-		2e5,
+		nil,
+		nil,
 		NewChunksLimiterFactory(0),
 		false,
 		20,
@@ -822,9 +822,9 @@ func testSharding(t *testing.T, reuseDisk string, bkt objstore.Bucket, all ...ul
 				objstore.WithNoopInstr(rec),
 				metaFetcher,
 				dir,
-				noopCache{},
 				nil,
-				0,
+				nil,
+				nil,
 				NewChunksLimiterFactory(0),
 				false,
 				20,
@@ -1196,7 +1196,6 @@ func benchBucketSeries(t testutil.TB, skipChunk bool, samplesPerSeries, totalSer
 
 	var (
 		logger = log.NewNopLogger()
-		blocks []*bucketBlock
 		series []*storepb.Series
 		random = rand.New(rand.NewSource(120))
 	)
@@ -1208,13 +1207,6 @@ func benchBucketSeries(t testutil.TB, skipChunk bool, samplesPerSeries, totalSer
 		Source:     metadata.TestSource,
 	}
 
-	var chunkPool pool.BytesPool
-	chunkPool, err = pool.NewBucketedBytesPool(maxChunkSize, 50e6, 2, 100e7)
-	testutil.Ok(t, err)
-
-	if !t.IsBenchmark() {
-		chunkPool = &mockedPool{parent: chunkPool}
-	}
 	blockDir := filepath.Join(tmpDir, "tmp")
 
 	samplesPerSeriesPerBlock := samplesPerSeries / numOfBlocks
@@ -1243,42 +1235,46 @@ func benchBucketSeries(t testutil.TB, skipChunk bool, samplesPerSeries, totalSer
 		testutil.Ok(t, head.Close())
 		series = append(series, bSeries...)
 
-		meta, err := metadata.InjectThanos(log.NewNopLogger(), filepath.Join(blockDir, id.String()), thanosMeta, nil)
+		meta, err := metadata.InjectThanos(logger, filepath.Join(blockDir, id.String()), thanosMeta, nil)
 		testutil.Ok(t, err)
+
+		testutil.Ok(t, meta.WriteToDir(logger, filepath.Join(blockDir, id.String())))
 		testutil.Ok(t, block.Upload(context.Background(), logger, bkt, filepath.Join(blockDir, id.String())))
-
-		m := newBucketStoreMetrics(nil)
-		b := &bucketBlock{
-			indexCache:  noopCache{},
-			logger:      logger,
-			metrics:     m,
-			bkt:         bkt,
-			meta:        meta,
-			partitioner: gapBasedPartitioner{maxGapSize: partitionerMaxGapSize},
-			chunkObjs:   []string{filepath.Join(id.String(), "chunks", "000001")},
-			chunkPool:   chunkPool,
-			extLset:     extLset,
-		}
-		blocks = append(blocks, b)
 	}
 
-	store := &BucketStore{
-		bkt:             objstore.WithNoopInstr(bkt),
-		logger:          logger,
-		indexCache:      noopCache{},
-		indexReaderPool: indexheader.NewReaderPool(log.NewNopLogger(), false, 0, nil),
-		metrics:         newBucketStoreMetrics(nil),
-		blockSets: map[uint64]*bucketBlockSet{
-			labels.Labels{{Name: "ext1", Value: "1"}}.Hash(): {blocks: [][]*bucketBlock{blocks}},
-		},
-		queryGate:            noopGate{},
-		chunksLimiterFactory: NewChunksLimiterFactory(0),
+	ibkt := objstore.WithNoopInstr(bkt)
+	f, err := block.NewRawMetaFetcher(logger, ibkt)
+	testutil.Ok(t, err)
+
+	chunkPool, err := pool.NewBucketedBytes(EstimatedMaxChunkSize, 50e6, 2, 1e9) // 1GB.
+	testutil.Ok(t, err)
+
+	st, err := NewBucketStore(
+		logger,
+		nil,
+		ibkt,
+		f,
+		tmpDir,
+		nil,
+		nil,
+		chunkPool,
+		NewChunksLimiterFactory(0),
+		false,
+		1,
+		nil,
+		false,
+		DefaultPostingOffsetInMemorySampling,
+		false,
+		false,
+		0,
+	)
+	testutil.Ok(t, err)
+
+	if !t.IsBenchmark() {
+		st.chunkPool = &mockedPool{parent: st.chunkPool}
 	}
 
-	for _, block := range blocks {
-		block.indexHeaderReader, err = indexheader.NewBinaryReader(context.Background(), log.NewNopLogger(), bkt, tmpDir, block.meta.ULID, DefaultPostingOffsetInMemorySampling)
-		testutil.Ok(t, err)
-	}
+	testutil.Ok(t, st.SyncBlocks(context.Background()))
 
 	var bCases []*storetestutil.SeriesCase
 	for _, p := range requestedRatios {
@@ -1307,18 +1303,18 @@ func benchBucketSeries(t testutil.TB, skipChunk bool, samplesPerSeries, totalSer
 			ExpectedSeries: series[:seriesCut],
 		})
 	}
-	storetestutil.TestServerSeries(t, store, bCases...)
+	storetestutil.TestServerSeries(t, st, bCases...)
 
 	if !t.IsBenchmark() {
 		if !skipChunk {
 			// Make sure the pool is correctly used. This is expected for 200k numbers.
-			testutil.Equals(t, numOfBlocks, int(chunkPool.(*mockedPool).gets.Load()))
+			testutil.Equals(t, numOfBlocks, int(st.chunkPool.(*mockedPool).gets.Load()))
 			// TODO(bwplotka): This is wrong negative for large number of samples (1mln). Investigate.
-			testutil.Equals(t, 0, int(chunkPool.(*mockedPool).balance.Load()))
-			chunkPool.(*mockedPool).gets.Store(0)
+			testutil.Equals(t, 0, int(st.chunkPool.(*mockedPool).balance.Load()))
+			st.chunkPool.(*mockedPool).gets.Store(0)
 		}
 
-		for _, b := range blocks {
+		for _, b := range st.blocks {
 			// NOTE(bwplotka): It is 4 x 1.0 for 100mln samples. Kind of make sense: long series.
 			testutil.Equals(t, 0.0, promtest.ToFloat64(b.metrics.seriesRefetches))
 		}
@@ -1337,7 +1333,7 @@ func (m fakePool) Get(sz int) (*[]byte, error) {
 func (m fakePool) Put(_ *[]byte) {}
 
 type mockedPool struct {
-	parent  pool.BytesPool
+	parent  pool.Bytes
 	balance atomic.Uint64
 	gets    atomic.Uint64
 }
@@ -1357,11 +1353,6 @@ func (m *mockedPool) Put(b *[]byte) {
 	m.parent.Put(b)
 }
 
-type noopGate struct{}
-
-func (noopGate) Start(context.Context) error { return nil }
-func (noopGate) Done()                       {}
-
 // Regression test against: https://github.com/thanos-io/thanos/issues/2147.
 func TestBucketSeries_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "segfault-series")
@@ -1379,7 +1370,7 @@ func TestBucketSeries_OneBlock_InMemIndexCacheSegfault(t *testing.T) {
 		Source:     metadata.TestSource,
 	}
 
-	chunkPool, err := pool.NewBucketedBytesPool(maxChunkSize, 50e6, 2, 100e7)
+	chunkPool, err := pool.NewBucketedBytes(EstimatedMaxChunkSize, 50e6, 2, 100e7)
 	testutil.Ok(t, err)
 
 	indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(logger, nil, storecache.InMemoryIndexCacheConfig{
@@ -1640,7 +1631,7 @@ func TestSeries_ErrorUnmarshallingRequestHints(t *testing.T) {
 		tmpDir,
 		indexCache,
 		nil,
-		1000000,
+		nil,
 		NewChunksLimiterFactory(10000/MaxSamplesPerChunk),
 		false,
 		10,
@@ -1725,6 +1716,9 @@ func TestSeries_BlockWithMultipleChunks(t *testing.T) {
 	indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(logger, nil, storecache.InMemoryIndexCacheConfig{})
 	testutil.Ok(tb, err)
 
+	chunkPool, err := pool.NewBucketedBytes(EstimatedMaxChunkSize, 50e6, 2, 1000000)
+	testutil.Ok(t, err)
+
 	store, err := NewBucketStore(
 		logger,
 		nil,
@@ -1733,7 +1727,7 @@ func TestSeries_BlockWithMultipleChunks(t *testing.T) {
 		tmpDir,
 		indexCache,
 		nil,
-		1000000,
+		chunkPool,
 		NewChunksLimiterFactory(100000/MaxSamplesPerChunk),
 		false,
 		10,
@@ -1869,6 +1863,9 @@ func TestBlockWithLargeChunks(t *testing.T) {
 	indexCache, err := storecache.NewInMemoryIndexCacheWithConfig(logger, nil, storecache.InMemoryIndexCacheConfig{})
 	testutil.Ok(t, err)
 
+	chunkPool, err := pool.NewBucketedBytes(EstimatedMaxChunkSize, 50e6, 2, 1000000)
+	testutil.Ok(t, err)
+
 	store, err := NewBucketStore(
 		logger,
 		nil,
@@ -1877,7 +1874,7 @@ func TestBlockWithLargeChunks(t *testing.T) {
 		tmpDir,
 		indexCache,
 		nil,
-		1000000,
+		chunkPool,
 		NewChunksLimiterFactory(10000/MaxSamplesPerChunk),
 		false,
 		10,
@@ -2037,7 +2034,7 @@ func setupStoreForHintsTest(t *testing.T) (testutil.TB, *BucketStore, []*storepb
 		tmpDir,
 		indexCache,
 		nil,
-		1000000,
+		nil,
 		NewChunksLimiterFactory(10000/MaxSamplesPerChunk),
 		false,
 		10,

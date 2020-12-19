@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/route"
+	"github.com/thanos-io/thanos/pkg/pool"
 
 	blocksAPI "github.com/thanos-io/thanos/pkg/api/blocks"
 	"github.com/thanos-io/thanos/pkg/block"
@@ -293,6 +294,11 @@ func runStore(
 
 	queriesGate := gate.New(extprom.WrapRegistererWithPrefix("thanos_bucket_store_series_", reg), maxConcurrency)
 
+	chunkPool, err := pool.NewBucketedBytes(store.EstimatedMaxChunkSize, 50e6, 2, chunkPoolSizeBytes)
+	if err != nil {
+		return errors.Wrap(err, "create chunk pool")
+	}
+
 	bs, err := store.NewBucketStore(
 		logger,
 		reg,
@@ -301,7 +307,7 @@ func runStore(
 		dataDir,
 		indexCache,
 		queriesGate,
-		chunkPoolSizeBytes,
+		chunkPool,
 		store.NewChunksLimiterFactory(maxSampleCount/store.MaxSamplesPerChunk), // The samples limit is an approximation based on the max number of samples per chunk.
 		verbose,
 		blockSyncConcurrency,

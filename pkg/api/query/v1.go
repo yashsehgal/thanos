@@ -21,6 +21,7 @@ package v1
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"sort"
@@ -307,6 +308,7 @@ func (qapi *QueryAPI) query(r *http.Request) (interface{}, []error, *api.ApiErro
 }
 
 func (qapi *QueryAPI) queryRange(r *http.Request) (interface{}, []error, *api.ApiError) {
+	reqTime := time.Now()
 	start, err := parseTime(r.FormValue("start"))
 	if err != nil {
 		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}
@@ -411,6 +413,7 @@ func (qapi *QueryAPI) queryRange(r *http.Request) (interface{}, []error, *api.Ap
 		return nil, nil, &api.ApiError{Typ: api.ErrorExec, Err: res.Err}
 	}
 
+	fmt.Println("Request took:", time.Since(reqTime))
 	return &queryData{
 		ResultType: res.Value.Type(),
 		Result:     res.Value,
@@ -611,7 +614,7 @@ func (qapi *QueryAPI) labelNames(r *http.Request) (interface{}, []error, *api.Ap
 	return names, warnings, nil
 }
 
-func (qapi *QueryAPI) stores(r *http.Request) (interface{}, []error, *api.ApiError) {
+func (qapi *QueryAPI) stores(_ *http.Request) (interface{}, []error, *api.ApiError) {
 	statuses := make(map[string][]query.StoreStatus)
 	for _, status := range qapi.storeSet.GetStoreStatus() {
 		statuses[status.StoreType.String()] = append(statuses[status.StoreType.String()], status)

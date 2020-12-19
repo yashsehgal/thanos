@@ -27,7 +27,7 @@ import (
 	"github.com/thanos-io/thanos/pkg/receive"
 )
 
-const logLevel = "info"
+const infologLevel = "info"
 
 // Same as default for now.
 var defaultBackoffConfig = util.BackoffConfig{
@@ -73,7 +73,7 @@ func NewPrometheus(sharedDir string, name string, config, promImage string) (*e2
 			"--config.file":                     filepath.Join(container, "prometheus.yml"),
 			"--storage.tsdb.path":               container,
 			"--storage.tsdb.max-block-duration": "2h",
-			"--log.level":                       logLevel,
+			"--log.level":                       infologLevel,
 			"--web.listen-address":              ":9090",
 		})...),
 		e2e.NewHTTPReadinessProbe(9090, "/-/ready", 200, 200),
@@ -102,7 +102,7 @@ func NewPrometheusWithSidecar(sharedDir string, netName string, name string, con
 			"--http-address":      ":8080",
 			"--prometheus.url":    "http://" + prom.NetworkEndpointFor(netName, 9090),
 			"--tsdb.path":         dataDir,
-			"--log.level":         logLevel,
+			"--log.level":         infologLevel,
 		})...),
 		e2e.NewHTTPReadinessProbe(8080, "/-/ready", 200, 200),
 		8080,
@@ -124,7 +124,7 @@ func NewQuerier(sharedDir, name string, storeAddresses, fileSDStoreAddresses, ru
 		"--http-address":          ":8080",
 		"--query.replica-label":   replicaLabel,
 		"--store.sd-dns-interval": "5s",
-		"--log.level":             logLevel,
+		"--log.level":             "debug", // remove later.
 		"--query.max-concurrent":  "1",
 		"--store.sd-interval":     "5s",
 	})
@@ -217,7 +217,7 @@ func NewReceiver(sharedDir string, networkName string, name string, replicationF
 			"--remote-write.address":                    ":8081",
 			"--label":                                   fmt.Sprintf(`receive="%s"`, name),
 			"--tsdb.path":                               filepath.Join(container, "data"),
-			"--log.level":                               logLevel,
+			"--log.level":                               infologLevel,
 			"--receive.replication-factor":              strconv.Itoa(replicationFactor),
 			"--receive.local-endpoint":                  localEndpoint,
 			"--receive.hashrings-file":                  filepath.Join(container, "hashrings.json"),
@@ -267,7 +267,7 @@ func NewRuler(sharedDir string, name string, ruleSubDir string, amCfg []alert.Al
 			"--eval-interval":                 "3s",
 			"--alertmanagers.config":          string(amCfgBytes),
 			"--alertmanagers.sd-dns-interval": "1s",
-			"--log.level":                     logLevel,
+			"--log.level":                     infologLevel,
 			"--query.config":                  string(queryCfgBytes),
 			"--query.sd-dns-interval":         "1s",
 			"--resend-delay":                  "5s",
@@ -307,7 +307,7 @@ receivers:
 		e2e.NewCommandWithoutEntrypoint("/bin/alertmanager", e2e.BuildArgs(map[string]string{
 			"--config.file":         filepath.Join(container, "config.yaml"),
 			"--web.listen-address":  "0.0.0.0:8080",
-			"--log.level":           logLevel,
+			"--log.level":           infologLevel,
 			"--storage.path":        container,
 			"--web.get-concurrency": "1",
 			"--web.timeout":         "2m",
@@ -346,7 +346,7 @@ func NewStoreGW(sharedDir string, name string, bucketConfig client.BucketConfig,
 			"--grpc-address":      ":9091",
 			"--grpc-grace-period": "0s",
 			"--http-address":      ":8080",
-			"--log.level":         logLevel,
+			"--log.level":         infologLevel,
 			"--data-dir":          container,
 			"--objstore.config":   string(bktConfigBytes),
 			// Accelerated sync time for quicker test (3m by default).
@@ -389,7 +389,7 @@ func NewCompactor(sharedDir string, name string, bucketConfig client.BucketConfi
 		DefaultImage(),
 		e2e.NewCommand("compact", append(e2e.BuildArgs(map[string]string{
 			"--debug.name":              fmt.Sprintf("compact-%s", name),
-			"--log.level":               logLevel,
+			"--log.level":               infologLevel,
 			"--data-dir":                container,
 			"--objstore.config":         string(bktConfigBytes),
 			"--http-address":            ":8080",
@@ -416,7 +416,7 @@ func NewQueryFrontend(name string, downstreamURL string, cacheConfig queryfronte
 		"--debug.name":                        fmt.Sprintf("query-frontend-%s", name),
 		"--http-address":                      ":8080",
 		"--query-frontend.downstream-url":     downstreamURL,
-		"--log.level":                         logLevel,
+		"--log.level":                         infologLevel,
 		"--query-range.response-cache-config": string(cacheConfigBytes),
 	})
 
